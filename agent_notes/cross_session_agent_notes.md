@@ -1,3 +1,17 @@
+# Meta Info
+- Some items in README.md files are not yet implemented check for yourself
+- This is a mostly a "playground" for AI agents. The real codebase uses
+Docker-orchestrated containers for the database and the lerp submodule. Since
+you don't have access to docker, for integration tests, install postgis directly
+and the djangp project directly in your environment when you are prompoted to
+run integration tests
+
+- Anything and everything not listed under set-in-stone is editable
+- What is set-in-stone:
+    - PostGIS as the primary database
+    - django as the logic backend
+
+# More Project descriptions
 - Farm planning is built from nested containers: OrgPlan
 (future) or RanchPlan at the top, then FieldPlan, then
 FieldActivity, down to FieldActivityElement. Crop templates
