@@ -32,7 +32,7 @@ class MPolyAreaObject(models.Model):
         null=True
     )
 
-class Campus(orgs.OrgObject, MPolyAreaObject):
+class Site(orgs.OrgObject, MPolyAreaObject):
     class Meta:
         unique_together=[
             ('organization', 'name'),
@@ -55,10 +55,10 @@ class Campus(orgs.OrgObject, MPolyAreaObject):
 # Other
 # ==============================================================================
 
-class Office(Campus):
+class Office(Site):
     pass
 
-class Shop(Campus):
+class Shop(Site):
     pass
 
 # ==============================================================================
@@ -66,7 +66,7 @@ class Shop(Campus):
 # ==============================================================================
 
 
-class Ranch(Campus):
+class Ranch(Site):
     class Meta:
         verbose_name_plural = "Ranches"
 

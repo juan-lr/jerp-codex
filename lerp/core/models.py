@@ -85,7 +85,7 @@ class LengthUnit(models.TextChoices):
     CENTIMETER = 'centimeter', _('centimeters')
     KILOMETER = 'kilometer', _('kilometers')
     INCH = 'inch', _('inches')
-    FEET = 'foot', _('feet')
+    FOOT = 'foot', _('feet')
     MILE = 'mile', _('miles')
 
 class AreaUnit(models.TextChoices):
