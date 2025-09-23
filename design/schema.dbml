@@ -1,0 +1,757 @@
+// Revisions vs previous schema proposal:
+// - Removed farmplanning_field_plan_version; field activities now attach to
+//   farmplanning_field_plan with an is_actual flag and rely on django-simple-history
+//   for as-of comparisons.
+// - Added accessible authentication tables for login aliases, recovery contacts,
+//   and security profiles; email on users is now optional/non-unique.
+// - Added organizations_invitation lifecycle so support can onboard users without
+//   depending on django-organizations while still integrating with allauth.
+// - Trimmed organizations_scope_type to match the simplified farmplanning hierarchy.
+// - Added `service`s to resource types
+// - Note the use of partial tables which act ~like abstract classes
+
+Project jerp_erp {
+  database_type: "PostgreSQL"
+  Note: 'PostGIS-backed ERP schema for farm farmplanning'
+}
+
+/************************************************************************************
+core
+************************************************************************************/
+
+Enum core_dimension {
+  dimensionless
+  quantity
+  area
+  density
+  energy
+  force
+  length
+  mass
+  speed
+  "time"
+  volume
+}
+
+Enum core_time_unit {
+  si_unit
+  minute
+  hour
+  day
+}
+
+Enum core_length_unit {
+  si_unit
+  centimeter
+  kilometer
+  inch
+  foot
+  mile
+}
+
+// more core_<dimension>_unit Enums for dimensions: AREA, DENSITY, etc.
+
+TablePartial DBEnum {
+  name varchar(64) [pk]
+}
+
+TablePartial HierarchicalEnumWithDesc {
+  id serial [pk]
+  name varchar(32)
+  description text
+  note: 'MPTTModel - has optional parent of self'
+}
+
+/************************************************************************************
+users
+************************************************************************************/
+Enum users_recovery_channel_type {
+  email
+  phone
+  support_note
+}
+
+Table users_user {
+  id uuid [pk]
+  username text [not null, unique]
+  email text
+  phone_number varchar(20)
+  password text [not null]
+  first_name text
+  last_name text
+  // is_active boolean [not null, default: true]
+  // is_staff boolean [not null, default: false]
+  // is_superuser boolean [not null, default: false]
+  last_login timestamp
+  date_joined timestamp [not null]
+}
+
+TablePartial user_profile {
+  id uuid [pk]
+  user uuid [not null, unique, ref: > users_user.id]
+}
+
+Table users_user_global_profile {
+  ~user_profile
+  support_notes text
+  updated_at timestamp [not null]
+
+  timezone text [not null, default: 'America/Los_Angeles']
+  preferred_language varchar(5)
+}
+
+Table users_user_recovery_contact {
+  id uuid [pk]
+  user_id uuid [not null, ref: > users_user.id]
+  channel users_recovery_channel_type [not null]
+  value text [not null]
+  verified_at timestamp
+  added_by uuid [ref: > users_user.id]
+  created_at timestamp [not null]
+  notes text
+
+  indexes {
+    (user_id, channel, value) [unique]
+  }
+}
+
+Table users_user_security_profile {
+  id uuid [pk]
+  user uuid [not null, unique, ref: > users_user.id]
+  requires_password_reset boolean [not null, default: false]
+  mfa_required boolean [not null, default: false]
+  mfa_enforced_at timestamp
+  last_password_rotated_at timestamp
+  support_pin varchar(12)
+  support_pin_expires_at timestamp
+  created_at timestamp [not null]
+  updated_at timestamp [not null]
+}
+
+Table users_user_unit_preference {
+  id bigserial [pk]
+  user_global_profile uuid [not null, ref: > users_user_global_profile.id]
+  dimension core_dimension [not null]
+  preferred_unit varchar(32) [not null]
+  created_at timestamp [not null]
+  updated_at timestamp [not null]
+
+  indexes {
+    (user_global_profile, dimension) [unique]
+  }
+}
+
+/************************************************************************************
+organizations
+************************************************************************************/
+
+Enum organizations_membership_status {
+  invited
+  active
+  suspended
+  archived
+}
+
+Enum organizations_scope_type {
+  organization
+  org
+  site
+  field
+  field_activity
+  crop_plan
+  inventory_item
+  storage_location
+  asset
+}
+
+Enum organizations_invitation_status {
+  draft
+  sent
+  accepted
+  expired
+  revoked
+  cancelled
+}
+
+Table organizations_organization {
+  id uuid [pk]
+  name text [not null]
+  slug text [not null, unique]
+  timezone text [not null, default: 'America/Los_Angeles']
+  primary_currency varchar(3) [not null, default: 'USD']
+  description text
+  is_active boolean [not null, default: true]
+  created_at timestamp [not null]
+  updated_at timestamp [not null, note: 'Use simple-history']
+  note: 'don\'t forget simple-history'
+}
+
+TablePartial organization_id {
+  organization uuid [not null, unique, ref: > organizations_organization.id]
+  note: 'equivalent to OrgObject Mixin'
+}
+
+Table organizations_membership {
+  id uuid [pk]
+  organization uuid [not null, ref: > organizations_organization.id]
+  user uuid [not null, ref: > users_user.id]
+  status organizations_membership_status [not null, default: 'invited']
+  joined_at timestamp
+  invited_by uuid [ref: - users_user.id]
+  support_notes text
+  created_at timestamp [not null]
+
+  indexes {
+    (organization, user) [unique]
+  }
+}
+
+Table organizations_role {
+  id uuid [pk]
+  organization uuid [not null, ref: > organizations_organization.id]
+  name text [not null]
+  description text
+  can_manage_members boolean [not null, default: false]
+  created_at timestamp [not null]
+  created_by uuid [ref: > users_user.id]
+
+  indexes {
+    (organization, "name") [unique]
+  }
+} // M2M with users_user through organizations_user_role
+
+Table organizations_user_role {
+  id uuid [pk]
+  user uuid [not null, ref: > users_user.id]
+  role uuid [not null, ref: > organizations_role.id]
+  indexes {
+    (user, role) [unique]
+  }
+  note: 'use simple-history & add constraint that user and role must belong to the same organization'
+}
+
+Table organizations_object_permission {
+  id uuid [pk]
+  ~organization_id
+  name text [not null]
+  description text
+  scope_type organizations_scope_type [not null, default: 'site', note: 'describes permissions cascading']
+
+  note: 'leaving object-level permissions do django-guardian - uses genericforiegnkeys - & use simple-history if possible'
+} // M2M with organizations_role through organizations_role_object_permission
+
+Table organizations_type_permission {
+  id uuid [pk]
+  ~organization_id
+  name text [not null]
+  description text
+} // M2M with organizations_role through organizations_role_type_permission
+
+Table organizations_role_object_permission {
+  id uuid [pk]
+  role uuid [not null, ref: > organizations_role.id]
+  permission uuid [not null, ref: > organizations_object_permission.id]
+
+  indexes {
+    (role, permission) [unique]
+  }
+  note: 'use django-simple-history'
+}
+
+Table organizations_role_type_permission {
+  id uuid [pk]
+  role uuid [not null, ref: > organizations_role.id]
+  permission uuid [not null, ref: > organizations_type_permission.id]
+  created_at timestamp [not null]
+
+  indexes {
+    (role, permission) [unique]
+  }
+  note: 'use django-simple-history'
+}
+
+Table organizations_invitation {
+  id uuid [pk]
+  organization uuid [not null, ref: > organizations_organization.id]
+  email text
+  login_alias text
+  invited_role uuid [ref: > organizations_role.id]
+  status organizations_invitation_status [not null, default: 'draft']
+  token text [not null, unique]
+  invited_by uuid [ref: - users_user.id]
+  invited_user_id uuid [ref: > users_user.id]
+  expires_at timestamp
+  sent_at timestamp
+  accepted_at timestamp
+  created_at timestamp [not null]
+  notes text
+}
+
+Table organizations_partnership {
+  id uuid [pk]
+  vendor uuid [not null, ref: > organizations_organization.id]
+  client uuid [not null, ref: > organizations_organization.id]
+}
+
+TablePartial OrgDBEnum {
+  id uuid [pk]
+  organization uuid [not null, ref: > organizations_organization.id]
+  name varchar(64)
+  indexes {
+    (orgnaization, "name") [unique]
+  }
+}
+
+TablePartial HierarchicalOrgCode {
+  id uuid [pk]
+  organization uuid [not null, ref: > organizations_organization.id]
+  ~HierarchicalEnumWithDesc
+  code varchar(64)
+  indexes {
+    (organization, code) [unique]
+  }
+}
+
+/************************************************************************************
+accounting
+************************************************************************************/
+
+Enum accounting_hicat_type {
+  asset
+  liability
+  equity
+  revenue
+  expense
+  other
+}
+
+Enum accounting_asset_status {
+  owned
+  rented
+  archived
+}
+
+Table accounting_activity_hicat {~HierarchicalOrgCode}
+Table accounting_material_hicat {~HierarchicalOrgCode}
+Table accounting_labor_hicat {~HierarchicalOrgCode}
+Table accounting_service_hicat {~HierarchicalOrgCode}
+Table accounting_product_hicat {~HierarchicalOrgCode}
+
+/************************************************************************************
+resources
+************************************************************************************/
+
+Enum resources_inventory_transaction_type {
+  receipt
+  issue
+  transfer
+  adjustment
+  return
+}
+
+Enum resources_storage_location_type {
+  warehouse
+  tank
+  yard
+  field_cache
+  other
+}
+
+Table resources_activity_hicat {
+  ~HierarchicalOrgCode
+  accounting_hicat uuid [ref: > accounting_activity_hicat.id]
+  rate_numerator_dimension core_dimension [default: 'area']
+  rate_denominator_dimension core_dimension [default: 'time']
+  rate_benchmark float(24)
+  //default_cost_dim core_dimension [default: 'area']
+  //default_cost_per_si_unit float(24) [note: '<= 0']
+  note: 'above commented to encourage filling at element level'
+}
+Table resources_material_hicat {
+  ~HierarchicalOrgCode
+  accounting_hicat uuid [ref: > accounting_material_hicat.id]
+  cost_dim core_dimension
+  cost_per_si_unit float(24) [note: '<= 0']
+}
+Table resources_labor_hicat {
+  ~HierarchicalOrgCode
+  accounting_hicat uuid [ref: > accounting_labor_hicat.id]
+  cost_dim core_dimension [default: 'time']
+  cost_per_si_unit float(24) [note: '<= 0']
+}
+Table resources_service_hicat {
+  ~HierarchicalOrgCode
+  accounting_hicat uuid [ref: > accounting_service_hicat.id]
+  cost_dim core_dimension
+  cost_per_si_unit float(24) [note: '<= 0']
+}
+Table resources_product_hicat {
+  ~HierarchicalOrgCode
+  accounting_hicat uuid [ref: > accounting_product_hicat.id]
+  price_dim core_dimension [default: 'mass']
+  price_per_si_unit float(24) [note: '<= 0']
+}
+
+Table resources_storage_location {
+  id uuid [pk]
+  organization_id uuid [not null, ref: > organizations_organization.id]
+  name text [not null]
+  location_type resources_storage_location_type [not null]
+  category text
+  description text
+  centroid geometry [note: 'Point, SRID 4326']
+  boundary geometry [note: 'MultiPolygon, SRID 4326']
+  capacity numeric(18,4)
+  capacity_unit_hicat text
+  is_active boolean [not null, default: true]
+  created_at timestamp [not null]
+
+  indexes {
+    (organization_id, "name") [unique]
+  }
+}
+
+Table resources_inventory_item {
+  id uuid [pk]
+  organization_id uuid [not null, ref: > organizations_organization.id]
+  material_category_id uuid [ref: > resources_material_hicat.id]
+  product_category_id uuid [ref: > resources_product_hicat.id]
+  category text
+  name text [not null]
+  sku text
+  description text
+  dimension core_dimension [not null, default: "quantity"]
+  value float(24) 
+  notes text
+  is_active boolean [not null, default: true]
+  requires_view_financials boolean [not null, default: false]
+  created_at timestamp [not null]
+
+  indexes {
+    (organization_id, "name")
+  }
+}
+
+Table resources_inventory_lot {
+  id uuid [pk]
+  inventory_item_id uuid [not null, ref: > resources_inventory_item.id]
+  storage_location_id uuid [ref: > resources_storage_location.id]
+  lot_number text
+  quantity_on_hand numeric(18,6) [not null, default: 0]
+  dimension core_dimension
+  cost_per_unit numeric(18,4)
+  currency varchar(3) [not null, default: 'USD']
+  received_at timestamp [not null]
+  expires_at date
+  //supplier_id uuid [ref: > resources_partner.id]
+
+  indexes {
+    (inventory_item_id, lot_number) [unique]
+  }
+}
+
+Table resources_asset {
+  id uuid [pk]
+  organization uuid [not null, ref: > organizations_organization.id]
+  asset_id varchar(64)
+  name text [not null]
+  asset_type resources_asset_type
+  description text
+  acquisition_date date
+  acquisition_cost numeric(18,2)
+  salvage_value numeric(18,2)
+  serial_number text
+  //owned_by_partner_id uuid [ref: > resources_partner.id]
+  status accounting_asset_status [not null, default: 'rented']
+  is_active boolean [not null, default: true]
+  //requires_view_financials boolean [not null, default: true]
+  indexes {
+    (organization, asset_id) [unique]
+    (organization, "name") [unique]
+  }
+  note: 'simple-history'
+}
+
+/************************************************************************************
+equipment
+************************************************************************************/
+
+Table equipment_tractor_make {
+  name varchar(64) [not null, pk]
+}
+
+Table equipment_tractor_model {
+  id serial [pk]
+  make uuid [ref: > equipment_tractor_make.name]
+  name varchar(64) [not null]
+  engine_power numeric(12,3)
+  description text
+
+  indexes {
+    ("make", "name") [unique]
+  }
+}
+
+Table equipment_tractor {
+  id uuid [pk]
+  model uuid [ref: > equipment_tractor_model.id]
+  telematics_identifier text
+  default_cost_dim core_dimension
+  default_cost_per_si_unit numeric(18,4)
+  notes text
+
+}
+
+Table equipment_implement_category {
+  ~OrgDBEnum
+}
+
+Table equipment_implement {
+  id uuid [pk]
+  asset_id uuid [not null, unique, ref: > resources_asset.id]
+  model uuid [ref: > equipment_tractor_model.id]
+  telematics_identifier text
+  default_cost_dim core_dimension
+  default_cost_per_si_unit numeric(18,4)
+  notes text
+}
+
+/************************************************************************************
+realestate
+************************************************************************************/
+
+Enum realestate_site_type {
+  office
+  shop
+  ranch
+  campus
+}
+
+TablePartial mpoly_area {
+  boundary geometry [note: 'MultiPolygon, SRID 4326']
+  area float(24) [note: 'GeneratedField from boundry']
+}
+
+TablePartial realestate_site {
+  id serial [pk]
+  organization uuid [not null, ref: > organizations_organization.id]
+  name varchar(16) [not null]
+  abbreviation text
+  site_type realestate_site_type [not null]
+  status accounting_asset_status [not null, default: 'rented']
+  ~mpoly_area
+
+  indexes {
+    (organization, "name") [unique]
+    (organization, abbreviation) [unique]
+  }
+
+  note: 'Use simple-history to track updates'
+}
+
+Table realestate_ranch {
+  ~realestate_site
+}
+
+Table realestate_field {
+  id serial [pk]
+  ranch serial [not null, ref: > realestate_ranch.id]
+  name text [not null]
+  ~mpoly_area
+  soil_type text
+  irrigation_type text
+  drainage_class text
+  slope_percent numeric(6,3)
+  is_active boolean [not null, default: true]
+  created_at timestamp [not null]
+
+  indexes {
+    (ranch, "name") [unique]
+  }
+}
+
+Table realestate_field_state {
+  id uuid [pk]
+  field_id uuid [not null, ref: > realestate_field.id]
+  date date [not null]
+  soil_quality numeric(6,4)
+  product_category_id uuid [ref: > resources_product_hicat.id]
+  plant_date date
+  notes text
+
+  indexes {
+    (field_id, date) [unique]
+  }
+}
+
+/************************************************************************************
+farmplanning
+************************************************************************************/
+
+Enum farmplanning_plan_status {
+  draft
+  planned
+  "in progress"
+  complete
+  cancelled
+  archived
+}
+
+Enum farmplanning_activity_element_type {
+  material
+  labor
+  equipment
+  service
+}
+
+Enum farmplanning_activity_assignment_role {
+  owner
+  collaborator
+  watcher
+}
+
+Table farmplanning_season {
+  id uuid [pk]
+  organization_id uuid [not null, ref: > organizations_organization.id]
+  name text [not null]
+  start_date date [not null]
+  end_date date
+  status farmplanning_season_status [not null, default: 'draft']
+  created_at timestamp [not null]
+  created_by uuid [ref: > users_user.id]
+
+  indexes {
+    (organization_id, "name") [unique]
+  }
+}
+
+// plan containers
+Table farmplanning_org_plan {
+  id uuid [pk]
+  organization_id uuid [not null, ref: > organizations_organization.id]
+  season_id uuid [not null, ref: > farmplanning_season.id]
+  name text [not null]
+  description text
+  status farmplanning_org_plan_status [not null, default: 'draft']
+  owner_role_id uuid [ref: > organizations_role.id]
+  created_at timestamp [not null]
+  created_by uuid [ref: > users_user.id]
+}
+
+Table farmplanning_ranch_plan {
+  id bigserial [pk]
+  farmplanning_org_plan uuid [not null, ref: > farmplanning_org_plan.id]
+  name varchar(64) [not null]
+}
+
+Table farmplanning_crop_plan {
+  id bigserial [pk]
+  name varchar(64) [not null]
+  product uuid [ref: > resources_product_hicat.id]
+  ref_date date
+  note: 'require copy and to_field_plan methods'
+}
+
+Table farmplanning_field_plan {
+  id bigserial [pk]
+  farmplanning_ranch_plan uuid [not null, ref: > farmplanning_ranch_plan.id]
+}
+
+Table FieldActivityMixin {
+  time_from_ref_date interval
+  category uuid [not null, ref: > resources_activity_hicat.id]
+  note: 'category must be from some org as self!'
+}
+
+Table farmplanning_crop_plan_field_activity {
+  id bigserial [pk]
+  crop_plan bigserial [ref: > farmplanning_crop_plan.id]
+  note: 'category and crop_plan must be from some org as self! Needs `copy` & `to_field_activity` methods'
+}
+
+Table farmplanning_field_activity {
+  id bigserial [pk]
+  field_plan bigserial [ref: > farmplanning_field_plan.id]
+  note: 'category and field_plan must be from some org as self!'
+}
+
+// FAD = FieldActivityDependency
+Table farmplanning_fad_bool_enum {~OrgDBEnum}
+
+Table farmplanning_fad_bool {
+  id bigserial [pk]
+  field_activity bigserial [ref: > farmplanning_crop_plan_field_activity.id]
+  dependancy bigserial [ref: > farmplanning_fad_bool_enum.id]
+  note: 'all fields and self should be from the same org'
+}
+
+Table farmplanning_fad_bool_value {
+  id bigserial [pk]
+  field bigserial [ref: > realestate_field.id]
+  dependancy bigserial [ref: > farmplanning_fad_bool_enum.id]
+  note: 'all fields and self should be from the same org'
+}
+
+// Elements
+TablePartial farmplanning_activity_resource {
+  id bigserial [pk]
+  amount float(24) [note: '>= 0']
+}
+
+Table farmplanning_activity_labor {
+  ~farmplanning_activity_resource
+  category uuid [ref: > resources_labor_hicat.id]
+}
+
+Table farmplanning_activity_material {
+  ~farmplanning_activity_resource
+  category uuid [ref: > resources_material_hicat.id]
+}
+
+Table farmplanning_activity_tractor {
+  ~farmplanning_activity_resource
+  instance uuid [ref: > equipment_tractor.id]
+}
+
+Table farmplanning_activity_implement {
+  ~farmplanning_activity_resource
+  instance uuid [ref: > equipment_implement.id]
+}
+
+Table farmplanning_activity_service {
+  ~farmplanning_activity_resource
+  category uuid [ref: > resources_service_hicat.id]
+}
+
+Table farmplanning_crop_plan_field_activity_element {
+  id bigserial [pk]
+  crop_plan_field_activity bigserial [ref: > farmplanning_crop_plan_field_activity.id]
+  labor uuid [ref: > resources_labor_hicat.id]
+  material uuid [ref: > resources_material_hicat.id]
+  tractor uuid [ref: > equipment_tractor_model.id]
+  implement uuid [ref: > equipment_implement_category.id]
+  service uuid [ref: > resources_service_hicat.id]
+  note: 'only one resource (labor/material/tractor/implement/service) is allowed to be non-null'
+}
+
+Table farmplanning_field_activity_element {
+  id bigserial [pk]
+  crop_plan_field_activity bigserial [ref: > farmplanning_crop_plan_field_activity.id]
+  labor uuid [ref: > farmplanning_activity_labor.id]
+  material uuid [ref: > farmplanning_activity_material.id]
+  tractor uuid [ref: > farmplanning_activity_tractor.id]
+  implement uuid [ref: > farmplanning_activity_implement.id]
+  service uuid [ref: > farmplanning_activity_service.id]
+  note: 'only one resource (labor/material/tractor/implement/service) is allowed to be non-null'
+}
+
+// Table farmplanning_meter_reading {
+//   id uuid [pk]
+//   asset_id uuid [not null, ref: > resources_asset.id]
+//   reading_type text [not null]
+//   value numeric(18,3) [not null]
+//   unit_hicat text [not null]
+//   recorded_at timestamp [not null]
+//   recorded_by uuid [ref: > users_user.id]
+//   field_activity_id uuid [ref: > farmplanning_field_activity.id]
+// }
